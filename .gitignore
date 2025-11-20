@@ -3,3 +3,4 @@ __pycache__
 /logs
 /data
 rf-detr-base.pth
+.env
