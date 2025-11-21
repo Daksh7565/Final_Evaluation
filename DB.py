@@ -1,148 +1,49 @@
-# db.py
-from sqlalchemy import create_engine,Column,Integer,String,DateTime,JSON,ForeignKey,Text,func
-from sqlalchemy.orm import sessionmaker, scoped_session, relationship,declarative_base
-from pathlib import Path
+# ==============================================================================
+# 1. IMPORTS
+# ==============================================================================
+
 import json
-from pathlib import Path
 from datetime import datetime, timezone
-from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+    JSON,
+)
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-from sqlalchemy.sql import func
+# ==============================================================================
+# 2. CONFIGURATION & INITIALIZATION
+# ==============================================================================
 
-
-
-def log_frame_json(route_id: str, frame_index: int, detections: list, counts_incremented: dict):
-    """
-    detections: list of dicts:
-      {"track_id": int, "class": str, "bbox":[x1,y1,x2,y2], "centroid":[cx,cy], "crossed_line":bool}
-    """
-    out = {
-        "route_id": route_id,
-        "frame_index": frame_index,
-        "timestamp": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
-        "detections": detections,
-        "counts_incremented": counts_incremented
-    }
-    path = LOG_DIR / f"{route_id}.jsonl"
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(out) + "\n")
-
-
-
-
-
-# -------------------------------------------------------
-# 1. Per-minute aggregates
-# -------------------------------------------------------
-def get_per_minute_counts(route_id, run_id=None):
-    session = SessionLocal()
-
-    q = (
-        session.query(
-            func.strftime("%Y-%m-%d %H:%M", CountEvent.timestamp).label("minute"),
-            CountEvent.class_name,
-            func.sum(CountEvent.count_increment).label("count")
-        )
-        .filter(CountEvent.route_id == route_id)
-    )
-
-    if run_id:
-        q = q.filter(CountEvent.run_id == run_id)
-
-    q = q.group_by("minute", CountEvent.class_name).order_by("minute")
-
-    df = pd.DataFrame(q.all(), columns=["minute", "class_name", "count"])
-    session.close()
-    return df
-
-
-# -------------------------------------------------------
-# 2. Hourly aggregates
-# -------------------------------------------------------
-def get_hourly_counts(route_id):
-    session = SessionLocal()
-
-    q = (
-        session.query(
-            func.strftime("%Y-%m-%d %H", CountEvent.timestamp).label("hour"),
-            CountEvent.class_name,
-            func.sum(CountEvent.count_increment).label("count")
-        )
-        .filter(CountEvent.route_id == route_id)
-        .group_by("hour", CountEvent.class_name)
-        .order_by("hour")
-    )
-
-    df = pd.DataFrame(q.all(), columns=["hour", "class_name", "count"])
-    session.close()
-    return df
-
-
-# -------------------------------------------------------
-# 3. Class-wise distribution
-# -------------------------------------------------------
-def get_class_distribution(route_id):
-    session = SessionLocal()
-
-    q = (
-        session.query(
-            CountEvent.class_name,
-            func.sum(CountEvent.count_increment).label("count")
-        )
-        .filter(CountEvent.route_id == route_id)
-        .group_by(CountEvent.class_name)
-    )
-
-    df = pd.DataFrame(q.all(), columns=["class_name", "count"])
-    session.close()
-    return df
-
-
-# -------------------------------------------------------
-# 4. 5-minute rolling averages
-# -------------------------------------------------------
-def get_rolling_5min(df_per_minute):
-    if df_per_minute.empty:
-        return df_per_minute
-
-    df = df_per_minute.copy()
-    df["minute"] = pd.to_datetime(df["minute"])
-
-    # pivot into: minute | car | truck | bus
-    pivot = df.pivot_table(index="minute", columns="class_name", values="count", fill_value=0)
-
-    rolling = pivot.rolling("5min").mean()
-    rolling.reset_index(inplace=True)
-    return rolling
-
-
-# -------------------------------------------------------
-# 5. Export to CSV
-# -------------------------------------------------------
-def export_to_csv(df, filename):
-    df.to_csv(filename, index=False)
-    print(f"Saved CSV → {filename}")
-
-
+# --- a. Directory and Path Setup ---
 LOG_DIR = Path("logs/json")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_PATH = Path("data/traffic.db")
-DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)   
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# --- b. Database Setup ---
 DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
-Base = declarative_base()
 engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args={"check_same_thread": False}
+    DATABASE_URL, echo=False, connect_args={"check_same_thread": False}
 )
-
-SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# ==============================================================================
+# 3. DATABASE MODELS
+# ==============================================================================
+
 
 class Route(Base):
     __tablename__ = "routes"
@@ -153,6 +54,7 @@ class Route(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     runs = relationship("RouteRun", back_populates="route")
+
 
 class RouteRun(Base):
     __tablename__ = "route_runs"
@@ -166,6 +68,7 @@ class RouteRun(Base):
     vehicle_tracks = relationship("VehicleTrack", back_populates="run")
     counts = relationship("CountEvent", back_populates="run")
 
+
 class VehicleTrack(Base):
     __tablename__ = "vehicle_tracks"
     id = Column(Integer, primary_key=True, index=True)
@@ -178,6 +81,7 @@ class VehicleTrack(Base):
 
     run = relationship("RouteRun", back_populates="vehicle_tracks")
 
+
 class CountEvent(Base):
     __tablename__ = "counts"
     id = Column(Integer, primary_key=True, index=True)
@@ -188,3 +92,193 @@ class CountEvent(Base):
     count_increment = Column(Integer, nullable=False)
 
     run = relationship("RouteRun", back_populates="counts")
+
+
+# ==============================================================================
+# 4. LOGGING FUNCTIONS
+# ==============================================================================
+
+
+def log_frame_json(
+    route_id: str, frame_index: int, detections: list, counts_incremented: dict
+):
+    """Logs detection data for a single frame to a JSON file.
+
+    Args:
+        route_id (str): The identifier for the route.
+        frame_index (int): The index of the video frame.
+        detections (list): A list of detection dictionaries.
+        counts_incremented (dict): A dictionary of class counts that were incremented.
+    """
+    output_data = {
+        "route_id": route_id,
+        "frame_index": frame_index,
+        "timestamp": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+        "detections": detections,
+        "counts_incremented": counts_incremented,
+    }
+    log_path = LOG_DIR / f"{route_id}.json"
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(output_data) + "\n")
+
+
+# ==============================================================================
+# 5. DATA AGGREGATION & ANALYSIS
+# ==============================================================================
+
+
+def get_per_minute_counts(route_id, run_id=None):
+    """Retrieves per-minute vehicle counts for a given route."""
+    session = SessionLocal()
+    query = (
+        session.query(
+            func.strftime("%Y-%m-%d %H:%M", CountEvent.timestamp).label("minute"),
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        .group_by("minute", CountEvent.class_name)
+        .order_by("minute")
+    )
+
+    if run_id:
+        query = query.filter(CountEvent.run_id == run_id)
+
+    df = pd.DataFrame(query.all(), columns=["minute", "class_name", "count"])
+    session.close()
+    return df
+
+
+def get_hourly_counts(route_id):
+    """Retrieves hourly vehicle counts for a given route."""
+    session = SessionLocal()
+    query = (
+        session.query(
+            func.strftime("%Y-%m-%d %H", CountEvent.timestamp).label("hour"),
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        .group_by("hour", CountEvent.class_name)
+        .order_by("hour")
+    )
+    df = pd.DataFrame(query.all(), columns=["hour", "class_name", "count"])
+    session.close()
+    return df
+
+# In DB.py
+
+# ... (keep all your existing imports and model definitions) ...
+
+def get_time_series_counts(route_id, run_id=None):
+    """
+    Retrieves per-second vehicle counts for a given route.
+    This provides the highest granularity for flexible frontend resampling.
+    """
+    session = SessionLocal()
+    query = (
+        session.query(
+            # MODIFICATION: Group by the second to get high-resolution data
+            func.strftime("%Y-%m-%d %H:%M:%S", CountEvent.timestamp).label("timestamp"),
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        # MODIFICATION: Group by the full timestamp string
+        .group_by("timestamp", CountEvent.class_name)
+        .order_by("timestamp")
+    )
+
+    if run_id:
+        query = query.filter(CountEvent.run_id == run_id)
+
+    # MODIFICATION: Changed column name to 'timestamp' for clarity
+    df = pd.DataFrame(query.all(), columns=["timestamp", "class_name", "count"])
+    session.close()
+    return df
+
+# ... (keep get_class_distribution and other functions) ...
+# In DB.py - Add these functions if you choose this alternative path
+
+def get_per_30_second_counts(route_id, run_id=None):
+    """Retrieves per-30-second vehicle counts for a given route."""
+    session = SessionLocal()
+    query = (
+        session.query(
+            # Complex strftime: Groups seconds into '00' or '30'
+            (func.strftime('%Y-%m-%d %H:%M:', CountEvent.timestamp) or
+             (func.strftime('%S', CountEvent.timestamp) / 30 * 30)).label("time_bucket"),
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        .group_by("time_bucket", CountEvent.class_name)
+        .order_by("time_bucket")
+    )
+    if run_id:
+        query = query.filter(CountEvent.run_id == run_id)
+    df = pd.DataFrame(query.all(), columns=["time_bucket", "class_name", "count"])
+    session.close()
+    return df
+
+
+def get_per_10_second_counts(route_id, run_id=None):
+    """Retrieves per-10-second vehicle counts for a given route."""
+    session = SessionLocal()
+    query = (
+        session.query((func.strftime('%Y-%m-%d %H:%M:', CountEvent.timestamp) or (func.strftime('%S', CountEvent.timestamp) / 10 * 10)).label("time_bucket"),
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        .group_by("time_bucket", CountEvent.class_name)
+        .order_by("time_bucket")
+    )
+    if run_id:
+        query = query.filter(CountEvent.run_id == run_id)
+    df = pd.DataFrame(query.all(), columns=["time_bucket", "class_name", "count"])
+    session.close()
+    return df
+def get_class_distribution(route_id):
+    """Retrieves the distribution of vehicle classes for a given route."""
+    session = SessionLocal()
+    query = (
+        session.query(
+            CountEvent.class_name,
+            func.sum(CountEvent.count_increment).label("count"),
+        )
+        .filter(CountEvent.route_id == route_id)
+        .group_by(CountEvent.class_name)
+    )
+    df = pd.DataFrame(query.all(), columns=["class_name", "count"])
+    session.close()
+    return df
+
+
+def get_rolling_5min(df_per_minute):
+    """Calculates a 5-minute rolling average from per-minute count data."""
+    if df_per_minute.empty:
+        return df_per_minute
+
+    df = df_per_minute.copy()
+    df["minute"] = pd.to_datetime(df["minute"])
+
+    # Pivot to format: minute | car | truck | bus
+    pivot_df = df.pivot_table(
+        index="minute", columns="class_name", values="count", fill_value=0
+    )
+
+    rolling_avg = pivot_df.rolling("5min").mean()
+    rolling_avg.reset_index(inplace=True)
+    return rolling_avg
+
+
+# ==============================================================================
+# 6. DATA EXPORT
+# ==============================================================================
+
+
+def export_to_csv(df, filename):
+    """Exports a DataFrame to a CSV file."""
+    df.to_csv(filename, index=False)
+    print(f"Saved CSV → {filename}")
