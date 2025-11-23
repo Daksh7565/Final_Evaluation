@@ -33,23 +33,19 @@ Base.metadata.create_all(bind=engine)
 ROUTE_VIDEOS = {
     "route_01": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\Alibi ALI-IPU3030RV IP Camera Highway Surveillance.mp4",
     "route_02": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\Cars Moving On Road Stock Footage - Free Download.mp4",
-    "route_03": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\videoplayback (online-video-cutter.com).mp4",
-    "route_04": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\27260-362770008_large.mp4",
-    "route_05": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\istockphoto-534232220-640_adpp_is.mp4",
-    "route_06": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\istockphoto-866517852-640_adpp_is.mp4",
-    "route_07": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\istockphoto-1282097063-640_adpp_is.mp4",
-    "route_08": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\2103099-uhd_3840_2160_30fps (1).mp4",
+    "route_03": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\27260-362770008_large.mp4",
+    "route_04": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\istockphoto-866517852-640_adpp_is.mp4",
+    "route_05": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\istockphoto-1282097063-640_adpp_is.mp4",
+    "route_06": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\2103099-uhd_3840_2160_30fps (1).mp4",
 }
 
 ROUTE_LOCATIONS = {
     "route_01": "Highway Camera A - Northbound",
     "route_02": "City Road East - Midblock",
-    "route_03": "Intersection 7 - South",
-    "route_04": "Bypass Road - Near Junction",
-    "route_05": "Suburban Road - West",
-    "route_06": "Highway Sector 12",
-    "route_07": "Tunnel Exit Camera",
-    "route_08": "Market Road Central",
+    "route_03": "Bypass Road - Near Junction",
+    "route_04": "Highway Sector 12",
+    "route_05": "Tunnel Exit Camera",
+    "route_06": "Market Road Central",
 }
 
 
@@ -297,6 +293,14 @@ def main():
             location = ROUTE_LOCATIONS.get(rname, f"Simulated camera for {rname}")
             line_conf = {"type": "horizontal", "y_percent": 0.8}
             route_obj = get_or_create_route(session, rname, location=location, line_config=line_conf)
+            completed_run = session.query(RouteRun).filter(
+                RouteRun.route_id == route_obj.id,
+                RouteRun.end_time.isnot(None)
+            ).first()
+
+            if completed_run:
+                print(f"Route '{rname}' has already been processed successfully. Skipping.")
+                continue
             process_route(rname, vpath, model, tracker, session, route_obj)
 
     print("All routes processed.")

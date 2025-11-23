@@ -98,7 +98,7 @@ with st.sidebar:
     
     route_names = load_route_names()
     if not route_names:
-        st.error("No route data found. Run `route_runner.py` to process videos.")
+        st.error("No route data found. Run `routes.py` to process videos.")
         st.stop()
         
     selected_route = st.selectbox(
