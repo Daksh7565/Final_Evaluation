@@ -5,15 +5,8 @@ import pandas as pd
 from sqlalchemy.orm import sessionmaker
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
-
-# Optional LLM (used only for improved natural-language explanation)
-try:
-    from langchain_groq import ChatGroq
-    _HAS_GROQ = True
-except Exception:
-    _HAS_GROQ = False
-
-# Project DB imports
+import yaml
+from langchain_groq import ChatGroq
 from DB import engine, Route, SessionLocal, get_per_minute_counts, get_class_distribution, get_rolling_5min
 
 # Load environment variables
@@ -24,6 +17,13 @@ SessionLocal = sessionmaker(bind=engine)
 # ------------
 # Helper utilities
 # ------------
+def load_config(config_path="config.yaml"):
+    try:
+        with open(config_path,'r',encoding='utf-8') as fh:
+             return yaml.safe_load(fh)
+    except FileNotFoundError:
+        print(f"error: the file is not at the given path")
+config=load_config()
 
 def _mean_numeric_values(d: dict) -> float:
     vals = [v for k, v in d.items() if isinstance(v, (int, float))]
@@ -35,13 +35,11 @@ def _compute_confidence(best_score: float, second_score: float) -> float:
     if np.isinf(best_score):
         return 0.0
     if np.isinf(second_score):
-        # no competitor, high confidence
         return 0.98
     gap = second_score - best_score
-    # normalize gap relative to second_score (avoid div by zero)
     denom = max(abs(second_score), 1.0)
     normalized = max(0.0, min(gap / denom, 1.0))
-    base = 0.85
+    base = config["agent"]["confidence_mapping"]["base"]
     conf = base + normalized * (0.98 - base)
     return round(float(conf), 2)
 
@@ -66,7 +64,6 @@ def fetch_route_statistics(route_id: str, window: int = 10) -> dict:
         if df_min is None or df_min.empty:
             return {"route_id": route_id, "message": "No vehicle data available."}
 
-        # ensure minute column is datetime and sorted
         df = df_min.copy()
         df["minute"] = pd.to_datetime(df["minute"])
         df = df.sort_values("minute")
@@ -119,9 +116,9 @@ def compute_congestion_score(stats: dict) -> dict:
     route_id = stats.get("route_id")
 
     # Tunable weights
-    A = 0.6  # recent weight
-    B = 0.3  # rolling avg weight
-    C = 0.1  # truck weight
+    A = config["agent"]["congestion_weights"]["recent"] # recent weight
+    B = config["agent"]["congestion_weights"]["rolling_avg"]  # rolling avg weight
+    C = config["agent"]["congestion_weights"]["truck_factor"] # truck weight
 
     recent = float(stats.get("recent_window_counts", 0))
 
@@ -132,7 +129,7 @@ def compute_congestion_score(stats: dict) -> dict:
     class_dist = stats.get("class_distribution", []) or []
     truck_factor = 0
     for row in class_dist:
-        # support either 'class_name' or 'class' keys (robust)
+        
         name = row.get("class_name") or row.get("class")
         cnt = row.get("count") or row.get("cnt") or 0
         if name and str(name).lower() == "truck":
@@ -165,14 +162,14 @@ def recommend_route(context: dict, scores: list) -> dict:
     if not isinstance(scores, list):
         return {"error": "Invalid scores input; expected list."}
 
-    # filter out error entries and treat 'message' (no data) as disqualified
+
     valid = [s for s in scores if isinstance(s, dict) and ("score" in s) and (not np.isinf(s.get("score")))]
 
     if not valid:
         return {"error": "No valid scores available to recommend."}
 
     # find best and second-best for confidence calculation
-    sorted_scores = sorted(valid, key=lambda x: x["score"])  # ascending
+    sorted_scores = sorted(valid, key=lambda x: x["score"])  
     best = sorted_scores[0]
     second = sorted_scores[1] if len(sorted_scores) > 1 else {"score": float("inf")}
 
@@ -190,9 +187,9 @@ def recommend_route(context: dict, scores: list) -> dict:
 
     # Optionally generate LLM explanation if available and key present
     llm_reason = None
-    if _HAS_GROQ and os.getenv("key_sal_groq"):
+    if  os.getenv("key_sal_groq"):
         try:
-            llm = ChatGroq(model="llama3-8b-8192", groq_api_key=os.getenv("key_sal_groq"))
+            llm = ChatGroq(model=config["agent"]["llm"]["model_name"], groq_api_key=os.getenv("key_sal_groq"))
             # Craft a concise prompt that requests only the required format body
             prompt = (
                 "You are an expert traffic analyst. Provide a one-paragraph explanation (1-2 sentences) "
@@ -285,14 +282,14 @@ graph.add_edge("choose_best", END)
 route_agent = graph.compile()
 
 
-# Entry function used by Streamlit frontend
+
 def get_route_recommendation() -> str:
     """Runs the agent and returns the recommendation in the strict required format."""
     init = initial_state()
     final_state = route_agent.invoke(init)
     rec = final_state.get("recommendation")
 
-    # Handle errors
+   
     if rec is None:
         return "Recommended Route: N/A\n\nReason:\nNo recommendation produced.\n\nConfidence: 0.00"
 
@@ -306,7 +303,6 @@ def get_route_recommendation() -> str:
             f"Confidence: {rec.get('confidence', 'N/A')}"
         )
 
-    # Fallback
     return str(rec)
 
 

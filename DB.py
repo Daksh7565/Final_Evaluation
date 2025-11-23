@@ -5,6 +5,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import yaml
 
 import pandas as pd
 from sqlalchemy import (
@@ -25,10 +26,18 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 # ==============================================================================
 
 # --- a. Directory and Path Setup ---
-LOG_DIR = Path("logs/json")
+def load_config(config_path="config.yaml"):
+    try:
+        with open(config_path,'r',encoding='utf-8') as fh:
+            return yaml.safe_load(fh)
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found at '{config_path}'")
+config=load_config()
+
+LOG_DIR = Path(config["paths"]["log_dir"])
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-DATABASE_PATH = Path("data/traffic.db")
+DATABASE_PATH = Path(config["paths"]["database"])
 DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # --- b. Database Setup ---
@@ -166,9 +175,7 @@ def get_hourly_counts(route_id):
     session.close()
     return df
 
-# In DB.py
 
-# ... (keep all your existing imports and model definitions) ...
 
 def get_time_series_counts(route_id, run_id=None):
     """
@@ -192,20 +199,16 @@ def get_time_series_counts(route_id, run_id=None):
     if run_id:
         query = query.filter(CountEvent.run_id == run_id)
 
-    # MODIFICATION: Changed column name to 'timestamp' for clarity
     df = pd.DataFrame(query.all(), columns=["timestamp", "class_name", "count"])
     session.close()
     return df
 
-# ... (keep get_class_distribution and other functions) ...
-# In DB.py - Add these functions if you choose this alternative path
 
 def get_per_30_second_counts(route_id, run_id=None):
     """Retrieves per-30-second vehicle counts for a given route."""
     session = SessionLocal()
     query = (
         session.query(
-            # Complex strftime: Groups seconds into '00' or '30'
             (func.strftime('%Y-%m-%d %H:%M:', CountEvent.timestamp) or
              (func.strftime('%S', CountEvent.timestamp) / 30 * 30)).label("time_bucket"),
             CountEvent.class_name,
@@ -263,7 +266,6 @@ def get_rolling_5min(df_per_minute):
     df = df_per_minute.copy()
     df["minute"] = pd.to_datetime(df["minute"])
 
-    # Pivot to format: minute | car | truck | bus
     pivot_df = df.pivot_table(
         index="minute", columns="class_name", values="count", fill_value=0
     )

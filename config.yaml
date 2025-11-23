@@ -1,0 +1,115 @@
+# ===================================================================
+# Project Configuration: Real-Time Multi-Route Vehicle Counting
+# ===================================================================
+
+# --- File and Directory Paths ---
+paths:
+  # Directory where your route videos are stored.
+  video_dir: "data/test"
+  # Path to the SQLite database file.
+  database: "data/traffic.db"
+  # Directory for JSON logs.
+  log_dir: "logs/json"
+  # Directory to save processed frame snapshots for the dashboard.
+  snapshot_dir: "processed_frames"
+
+# --- Video Processing and Detection Settings (for route_runner.py) ---
+video_processing:
+  detection:
+    # Confidence threshold for object detection.
+    confidence_threshold: 0.5
+    # Resize frames to this size for model inference [width, height].
+    inference_size: [960, 540]
+    # List of vehicle classes to detect and count.
+    target_classes: ["car", "truck", "bus","motorcycle"]
+  
+  tracking:
+    # SORT Tracker: Max frames to keep a track alive without new detections.
+    max_age: 20
+    # SORT Tracker: Min hits to start a new track.
+    min_hits: 2
+    # SORT Tracker: IOU threshold for associating detections.
+    iou_threshold: 0.2
+
+  performance:
+    # Run detection every N frames (e.g., 2 means detect on frames 2, 4, 6...).
+    detection_interval: 2
+    # Number of DB events to batch before committing.
+    batch_commit_size: 20
+  
+  visualization:
+    # Show video window every N frames to improve performance.
+    show_every_n: 2
+    # Save a snapshot for the dashboard every N frames.
+    snapshot_interval: 30
+    # Maximum display height for the OpenCV window to prevent oversized windows.
+    display_max_height: 900
+
+# --- Agentic AI Settings (for agent.py) ---
+agent:
+  congestion_weights:
+    # Weight for recent vehicle counts in the congestion score.
+    recent: 0.6
+    # Weight for the 5-minute rolling average.
+    rolling_avg: 0.3
+    # Weight for the number of trucks (heavier impact on traffic).
+    truck_factor: 0.1
+  
+  confidence_mapping:
+    # The base confidence score when a recommendation is made.
+    base: 0.85
+    # The maximum confidence score (approached when there's a large gap to the next best route).
+    max: 0.98
+
+  llm:
+    # Model name to use for generating the reason text (optional).
+    model_name: "llama3-8b-8192"
+
+# --- Dashboard Settings (for frontend.py) ---
+dashboard:
+  title: "AI Traffic Analysis Dashboard"
+  icon: "🚗"
+
+# --- Route Definitions ---
+# Define each route here. The route_runner will automatically find and process them.
+# The 'filename' should exist in the 'video_dir' defined above.
+routes:
+  - name: "route_01"
+    filename: "Alibi ALI-IPU3030RV IP Camera Highway Surveillance.mp4"
+    location: "Highway Camera A - Northbound"
+    line_y_percent: 0.80
+  
+  - name: "route_02"
+    filename: "Cars Moving On Road Stock Footage - Free Download.mp4"
+    location: "City Road East - Midblock"
+    line_y_percent: 0.80
+
+  - name: "route_03"
+    filename: "videoplayback (online-video-cutter.com).mp4"
+    location: "Intersection 7 - South"
+    line_y_percent: 0.80
+
+  - name: "route_04"
+    filename: "27260-362770008_large.mp4"
+    location: "Bypass Road - Near Junction"
+    line_y_percent: 0.75
+
+  - name: "route_05"
+    filename: "istockphoto-534232220-640_adpp_is.mp4"
+    location: "Suburban Road - West"
+    line_y_percent: 0.85
+
+  - name: "route_06"
+    filename: "istockphoto-866517852-640_adpp_is.mp4"
+    location: "Highway Sector 12"
+    line_y_percent: 0.80
+    
+  - name: "route_07"
+    filename: "istockphoto-1282097063-640_adpp_is.mp4"
+    location: "Tunnel Exit Camera"
+    line_y_percent: 0.70
+
+  - name: "route_08"
+    filename: "2103099-uhd_3840_2160_30fps (1).mp4"
+    location: "Market Road Central"
+    line_y_percent: 0.80

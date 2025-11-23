@@ -1,46 +1,28 @@
-"""
-Cleaned and refactored route.py
-- Removed duplicate/commented blocks
-- Fixed: Route.location must not store video path
-- Fixed: use route.line_config['y_percent'] (configurable per-route counting line)
-- Batch DB commits, JSON logging, robust tracking & counting
-- Clear structure: helper functions, process_route(), main()
-- Added periodic snapshot saving for live dashboard visualization.
-- CORRECTED: Moved count display to the top-left corner as requested.
-- ADDED: Logic to create and update VehicleTrack records in the database.
-
-Note: This file depends on project modules: rfdetr.RFDETRBase, sort.Tracker.Sort, and DB.py (SQLAlchemy models & helper functions).
-"""
-
-import os
-import time
 from pathlib import Path
 from datetime import datetime
-from collections import defaultdict
-
 import cv2
 import numpy as np
 import torch
-
-# Project imports (assumed to be present in repo)
 from rfdetr import RFDETRBase
 from sort.Tracker import Sort
-
 from DB import (
     engine,
     SessionLocal,
-    get_per_minute_counts,
-    get_hourly_counts,
-    get_class_distribution,
-    get_rolling_5min,
     Base,
     Route,
     RouteRun,
-    VehicleTrack, # <-- IMPORTED
+    VehicleTrack,
     CountEvent,
     log_frame_json,
-    export_to_csv,
 )
+import yaml
+def load_config(config_path="config.yaml"):
+    try:
+        with open(config_path,'r',encoding='utf-8') as fh:
+            return yaml.safe_load(fh)
+    except FileNotFoundError:
+        print("error: file not found")
+config=load_config()
 
 # Ensure DB tables exist
 Base.metadata.create_all(bind=engine)
@@ -59,7 +41,6 @@ ROUTE_VIDEOS = {
     "route_08": r"C:\Users\jaydu\OneDrive\Desktop\python_projects\EVAL\Database\data\test\2103099-uhd_3840_2160_30fps (1).mp4",
 }
 
-# Optional human-readable mapping for route locations (replace as needed)
 ROUTE_LOCATIONS = {
     "route_01": "Highway Camera A - Northbound",
     "route_02": "City Road East - Midblock",
@@ -71,21 +52,20 @@ ROUTE_LOCATIONS = {
     "route_08": "Market Road Central",
 }
 
-# Tuning
-CONFIDENCE_THRESHOLD = 0.5
-INFERENCE_SIZE = (960, 540)
-DETECTION_INTERVAL = 2
-BATCH_COMMIT_SIZE = 20
-SHOW_EVERY_N = 2
-LOG_JSON_EVERY = 5
-REPORT_INTERVAL = 100  # frames
-TARGET_CLASSES = ["car", "truck", "bus"]
-DISPLAY_MAX_HEIGHT = 900
 
-# Configuration for saving dashboard snapshots
+CONFIDENCE_THRESHOLD = config["video_processing"]["detection"]["confidence_threshold"]
+INFERENCE_SIZE = config["video_processing"]["detection"]["inference_size"]
+DETECTION_INTERVAL = config["video_processing"]["performance"]["detection_interval"]
+BATCH_COMMIT_SIZE = config["video_processing"]["performance"]["batch_commit_size"]
+SHOW_EVERY_N = config["video_processing"]["visualization"]["show_every_n"]
+LOG_JSON_EVERY = 5
+REPORT_INTERVAL = 100  
+TARGET_CLASSES = config["video_processing"]["detection"]["target_classes"]
+DISPLAY_MAX_HEIGHT = config["video_processing"]["visualization"]["display_max_height"]
+
 SNAPSHOT_DIR = Path("processed_frames")
-SNAPSHOT_DIR.mkdir(exist_ok=True)  # Ensure the directory exists
-SNAPSHOT_INTERVAL = 30  # Save one frame every 30 frames (e.g., once per second for a 30fps video)
+SNAPSHOT_DIR.mkdir(exist_ok=True)  
+SNAPSHOT_INTERVAL = 30  
 
 
 # ------------------
@@ -148,7 +128,7 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
 
     counts = {c: 0 for c in TARGET_CLASSES}
     track_history = {}
-    active_tracks = {} # <-- NEW: Dictionary to hold active VehicleTrack ORM objects
+    active_tracks = {} 
     frame_index = 0
     window_name = f"Processing: {route_name}"
 
@@ -177,7 +157,7 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
             do_detect = (frame_index % DETECTION_INTERVAL == 0) or (prev_results is None)
             
             if do_detect:
-                inp_w, inp_h = INFERENCE_SIZE
+                inp_w, inp_h = INFERENCE_SIZE[0],INFERENCE_SIZE[1]
                 small = cv2.resize(frame, (inp_w, inp_h))
                 with torch.inference_mode():
                     results = model.predict(small, threshold=CONFIDENCE_THRESHOLD)
@@ -217,9 +197,6 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                     cls_id = int(prev_results["class_id"][idx])
                     cls_name = prev_results["class_names"].get(cls_id, "unknown")
 
-                # ==========================================================
-                # NEW: VEHICLE TRACK CREATION AND UPDATE LOGIC
-                # ==========================================================
                 if tid not in active_tracks:
                     # First time seeing this track ID, create a new record
                     new_track = VehicleTrack(
@@ -232,9 +209,7 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                     session.add(new_track)
                     active_tracks[tid] = new_track
                 else:
-                    # Existing track, just update its last_seen time
                     active_tracks[tid].last_seen = current_time
-                # ==========================================================
                 
                 prev_y = track_history.get(tid)
                 crossed = False
@@ -261,7 +236,6 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                 cv2.rectangle(frame, (x1_i, y1_i), (x2_i, y2_i), color, 2)
                 cv2.putText(frame, label, (x1_i, y1_i - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
-            # Draw counts on the top-left
             y_offset = 50
             padding = 20
             font_scale = 1.2
@@ -283,7 +257,6 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                 snapshot_path = SNAPSHOT_DIR / f"{route_name}_latest.jpg"
                 cv2.imwrite(str(snapshot_path), frame)
 
-            # The session.commit() will save both CountEvents and VehicleTrack updates.
             if frame_index % BATCH_COMMIT_SIZE == 0:
                 if pending_count_events:
                     session.bulk_save_objects(pending_count_events)
@@ -294,7 +267,6 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                 print(f"[{route_name}] Frame {frame_index} | Totals: {counts}")
 
     finally:
-        # Final commit to save any remaining data
         if pending_count_events:
             session.bulk_save_objects(pending_count_events)
         session.commit()

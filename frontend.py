@@ -5,15 +5,22 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 
-# Import your project's modules
-# IMPORTANT: Make sure you have the new get_time_series_counts function in your DB.py
 from DB import engine, Route, get_time_series_counts, get_class_distribution
 from agent import get_route_recommendation
+import yaml        
+
+def load_config(config_path="config.yaml"):
+    try:
+        with open(config_path,'r',encoding='utf-8') as fh:
+            return yaml.safe_load(fh)
+    except FileNotFoundError:
+        print(f"error: the file not found ")
+config=load_config()
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="AI Traffic Analysis Dashboard",
-    page_icon="🚗",
+    page_title=config["dashboard"]["title"],
+    page_icon=config["dashboard"]["icon"],
     layout="wide"
 )
 
@@ -44,7 +51,6 @@ def load_route_data(route_name):
         df_ts = get_time_series_counts(route.id) 
         df_dist = get_class_distribution(route.id)
         
-        # IMPORTANT: Rename the column to 'minute' to match the resampling function's expectation
         if 'timestamp' in df_ts.columns:
             df_ts.rename(columns={'timestamp': 'minute'}, inplace=True)
             
@@ -58,7 +64,6 @@ def get_busiest_hour(df_minute):
     if df_minute is None or df_minute.empty:
         return "N/A"
     
-    # Ensure 'minute' is a datetime object before proceeding
     df_minute['minute'] = pd.to_datetime(df_minute['minute'])
     per_minute_total = df_minute.groupby(pd.Grouper(key='minute', freq='T'))['count'].sum().reset_index()
 
@@ -132,7 +137,7 @@ if selected_route:
         # --- Key Metrics (KPIs) ---
         total_vehicles = int(df_distribution['count'].sum())
         vehicle_types = len(df_distribution)
-        busiest_hour = get_busiest_hour(df_ts.copy()) # Use a copy to avoid modifying the original df
+        busiest_hour = get_busiest_hour(df_ts.copy())
         common_vehicle = get_most_common_vehicle(df_distribution)
         
         kpi_cols = st.columns(4)

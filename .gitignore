@@ -4,3 +4,5 @@ __pycache__
 /data
 rf-detr-base.pth
 .env
+/db_exports
+/processed_frames
