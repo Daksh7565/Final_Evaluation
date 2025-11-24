@@ -180,7 +180,7 @@ Confidence: 0.92
 
 # 📈 Dashboard Preview
 
-<img src="frontend_sample.png" width="750">
+<img src="route_01.png" width="750">
 
 ---
 
