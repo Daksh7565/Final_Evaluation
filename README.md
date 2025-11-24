@@ -19,7 +19,7 @@ This project simulates a real-world traffic monitoring system across **6 indepen
 
 This system processes multiple road surveillance videos simultaneously, detects and tracks moving vehicles, counts line crossings, logs events to a database, analyzes traffic congestion patterns, and recommends the optimal route using an AI agent.
 
-<img src="route_01.jpg" width="700">
+<img src="route_01.png" width="700">
 *(Sample live snapshot as seen in the dashboard)*
 
 ---
