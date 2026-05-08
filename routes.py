@@ -16,6 +16,7 @@ from DB import (
     log_frame_json,
 )
 import yaml
+
 def load_config(config_path="config.yaml"):
     try:
         with open(config_path,'r',encoding='utf-8') as fh:
@@ -115,16 +116,17 @@ def end_route_run(session, run: RouteRun):
 
 
 # ------------------
-# Main processing function
+# Core Frame Generator (NEW - yields frames for Streamlit)
 # ------------------
 
-def process_route(route_name: str, video_path: str, model, tracker, session, route_obj: Route):
-    """Process a single route video: detect, track, count, log JSON and write DB events in batches."""
-    print(f"Processing {route_name} -> {video_path}")
-
+def process_route_generator(route_name: str, video_path: str, model, tracker, session, route_obj: Route):
+    """
+    Generator that processes a single route video and yields processed frames for live display.
+    Yields dicts with: frame (RGB), route_name, frame_index, counts, current_time, status
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Could not open video: {video_path}")
+        yield {"status": "error", "route_name": route_name, "message": f"Could not open video: {video_path}"}
         return
 
     run = start_route_run(session, route_obj, video_path)
@@ -133,6 +135,7 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
     # Initialize video writer
     output_video_path = OUTPUT_VIDEO_DIR / f"{route_name}_processed.mp4"
@@ -143,7 +146,6 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
     track_history = {}
     active_tracks = {} 
     frame_index = 0
-    window_name = f"Processing: {route_name}"
 
     pending_count_events = []
     prev_results, class_names = None, None
@@ -154,17 +156,23 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
         return boxes
 
     try:
+        yield {"status": "started", "route_name": route_name, "total_frames": total_frames, 
+               "message": f"Starting {route_name}...", "counts": counts.copy()}
+
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret: break
+            if not ret: 
+                break
 
             frame_index += 1
             frame_h, frame_w = frame.shape[:2]
 
             line_percent = 0.80
             if getattr(route_obj, "line_config", None):
-                try: line_percent = float(route_obj.line_config.get("y_percent", line_percent))
-                except (ValueError, TypeError): line_percent = 0.80
+                try: 
+                    line_percent = float(route_obj.line_config.get("y_percent", line_percent))
+                except (ValueError, TypeError): 
+                    line_percent = 0.80
             line_y = int(frame_h * line_percent)
 
             do_detect = (frame_index % DETECTION_INTERVAL == 0) or (prev_results is None)
@@ -188,7 +196,10 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                 filtered_class_ids = class_id_arr[mask]
                 
                 dets = np.hstack((filtered_xyxy, filtered_conf)) if filtered_xyxy.size else np.empty((0, 5))
-                prev_results = {"xyxy": filtered_xyxy, "conf": filtered_conf, "class_id": filtered_class_ids, "dets": dets, "class_names": class_names}
+                prev_results = {
+                    "xyxy": filtered_xyxy, "conf": filtered_conf, 
+                    "class_id": filtered_class_ids, "dets": dets, "class_names": class_names
+                }
             
             tracked_objects = tracker.update(prev_results["dets"]) if prev_results else np.empty((0, 5))
             
@@ -231,11 +242,18 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                     if cls_name in counts:
                         counts[cls_name] += 1
                         counts_incremented[cls_name] += 1
-                        pending_count_events.append(CountEvent(run_id=run.id, route_id=route_obj.id, class_name=cls_name, count_increment=1, timestamp=current_time))
+                        pending_count_events.append(CountEvent(
+                            run_id=run.id, route_id=route_obj.id, 
+                            class_name=cls_name, count_increment=1, timestamp=current_time
+                        ))
                 
                 track_history[tid] = cy
                 
-                detections_log_frame.append({"track_id": tid, "class": cls_name, "bbox": [int(x1), int(y1), int(x2), int(y2)], "centroid": [cx, cy], "crossed_line": crossed})
+                detections_log_frame.append({
+                    "track_id": tid, "class": cls_name, 
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)], 
+                    "centroid": [cx, cy], "crossed_line": crossed
+                })
 
             if frame_index % LOG_JSON_EVERY == 0 and detections_log_frame:
                 log_frame_json(route_name, frame_index, detections_log_frame, counts_incremented)
@@ -262,22 +280,16 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
                 cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
                 y_offset += text_height + padding + 10
 
-            if frame_index % SHOW_EVERY_N == 0:
-                safe_show(window_name, frame)
             # Write frame to output video
             if out.isOpened():
                 out.write(frame)
 
-                try:
-                    if cv2.waitKey(1) & 0xFF == ord("q"): break
-                except cv2.error:
-                    # OpenCV waitKey not available
-                    pass
-
+            # Take snapshot periodically
             if frame_index % SNAPSHOT_INTERVAL == 0:
                 snapshot_path = SNAPSHOT_DIR / f"{route_name}_latest.jpg"
                 cv2.imwrite(str(snapshot_path), frame)
 
+            # Batch commit to DB
             if frame_index % BATCH_COMMIT_SIZE == 0:
                 if pending_count_events:
                     session.bulk_save_objects(pending_count_events)
@@ -287,26 +299,78 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
             if frame_index % REPORT_INTERVAL == 0:
                 print(f"[{route_name}] Frame {frame_index} | Totals: {counts}")
 
+            # Yield frame for Streamlit display (convert BGR to RGB)
+            if frame_index % SHOW_EVERY_N == 0:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                yield {
+                    "status": "frame",
+                    "frame": frame_rgb,
+                    "route_name": route_name,
+                    "frame_index": frame_index,
+                    "total_frames": total_frames,
+                    "counts": counts.copy(),
+                    "detections": len(detections_log_frame),
+                    "timestamp": current_time.strftime("%H:%M:%S")
+                }
+
     finally:
         if pending_count_events:
             session.bulk_save_objects(pending_count_events)
         session.commit()
         
         cap.release()
-        try:
-            cv2.destroyAllWindows()
-        except cv2.error:
-            # OpenCV display not available
-            pass
+        if out.isOpened():
+            out.release()
         end_route_run(session, run)
-        print(f"Finished {route_name}. Totals: {counts}")
+        
+        yield {
+            "status": "completed",
+            "route_name": route_name,
+            "frame_index": frame_index,
+            "counts": counts.copy(),
+            "message": f"Finished {route_name}. Totals: {counts}"
+        }
+
+
+# ------------------
+# CLI processing function (backward compatible)
+# ------------------
+
+def process_route(route_name: str, video_path: str, model, tracker, session, route_obj: Route):
+    """Process a single route video with OpenCV display (CLI mode)."""
+    print(f"Processing {route_name} -> {video_path}")
+    window_name = f"Processing: {route_name}"
+
+    for result in process_route_generator(route_name, video_path, model, tracker, session, route_obj):
+        if result["status"] == "frame":
+            # Convert RGB back to BGR for OpenCV display
+            frame_bgr = cv2.cvtColor(result["frame"], cv2.COLOR_RGB2BGR)
+            safe_show(window_name, frame_bgr)
+            try:
+                if cv2.waitKey(1) & 0xFF == ord("q"): 
+                    break
+            except cv2.error:
+                pass
+        elif result["status"] == "completed":
+            print(result["message"])
+        elif result["status"] == "error":
+            print(result["message"])
+
+    try:
+        cv2.destroyWindow(window_name)
+    except cv2.error:
+        pass
+
 
 def main():
     print("Loading model...")
     model = RFDETRBase()
     try:
-        if torch.cuda.is_available(): model = model.to("cuda"); print("Model moved to CUDA")
-        else: print("CUDA not available; running on CPU")
+        if torch.cuda.is_available(): 
+            model = model.to("cuda")
+            print("Model moved to CUDA")
+        else: 
+            print("CUDA not available; running on CPU")
     except Exception as e:
         print(f"Warning checking CUDA availability: {e}")
 
@@ -322,6 +386,8 @@ def main():
             location = ROUTE_LOCATIONS.get(rname, f"Simulated camera for {rname}")
             line_conf = {"type": "horizontal", "y_percent": 0.8}
             route_obj = get_or_create_route(session, rname, location=location, line_config=line_conf)
+            
+            # Check if already processed (completed run exists)
             completed_run = session.query(RouteRun).filter(
                 RouteRun.route_id == route_obj.id,
                 RouteRun.end_time.isnot(None)
@@ -330,9 +396,11 @@ def main():
             if completed_run:
                 print(f"Route '{rname}' has already been processed successfully. Skipping.")
                 continue
+            
             process_route(rname, vpath, model, tracker, session, route_obj)
 
     print("All routes processed.")
+
 
 if __name__ == "__main__":
     main()
