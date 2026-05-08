@@ -6,3 +6,4 @@ rf-detr-base.pth
 .env
 /db_exports
 /processed_frames
+/output_videos

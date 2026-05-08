@@ -61,7 +61,10 @@ DISPLAY_MAX_HEIGHT = config["video_processing"]["visualization"]["display_max_he
 
 SNAPSHOT_DIR = Path("processed_frames")
 SNAPSHOT_DIR.mkdir(exist_ok=True)  
-SNAPSHOT_INTERVAL = 30  
+SNAPSHOT_INTERVAL = 30
+
+OUTPUT_VIDEO_DIR = Path("output_videos")
+OUTPUT_VIDEO_DIR.mkdir(exist_ok=True)  
 
 
 # ------------------
@@ -74,7 +77,11 @@ def safe_show(window_name: str, frame: np.ndarray):
     scale = DISPLAY_MAX_HEIGHT / h
     if scale < 1.0:
         frame = cv2.resize(frame, (int(w * scale), DISPLAY_MAX_HEIGHT))
-    cv2.imshow(window_name, frame)
+    try:
+        cv2.imshow(window_name, frame)
+    except cv2.error as e:
+        # OpenCV display not available (no GUI support on headless/Windows systems)
+        pass
 
 
 def get_or_create_route(session, name: str, location: str = None, line_config: dict = None):
@@ -122,6 +129,16 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
 
     run = start_route_run(session, route_obj, video_path)
 
+    # Get video properties for output video
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Initialize video writer
+    output_video_path = OUTPUT_VIDEO_DIR / f"{route_name}_processed.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(str(output_video_path), fourcc, fps, (frame_width, frame_height))
+
     counts = {c: 0 for c in TARGET_CLASSES}
     track_history = {}
     active_tracks = {} 
@@ -153,12 +170,12 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
             do_detect = (frame_index % DETECTION_INTERVAL == 0) or (prev_results is None)
             
             if do_detect:
-                inp_w, inp_h = INFERENCE_SIZE[0],INFERENCE_SIZE[1]
+                inp_w, inp_h = INFERENCE_SIZE[0], INFERENCE_SIZE[1]
                 small = cv2.resize(frame, (inp_w, inp_h))
                 with torch.inference_mode():
                     results = model.predict(small, threshold=CONFIDENCE_THRESHOLD)
                 
-                class_names = getattr(results, "class_names", getattr(model, "class_names", None))
+                class_names = results.class_names if hasattr(results, "class_names") else getattr(model, "class_names", None)
                 target_ids = [k for k, v in (class_names or {}).items() if v in TARGET_CLASSES]
                 
                 class_id_arr = np.array(results.class_id.cpu() if hasattr(results.class_id, 'cpu') else results.class_id, dtype=int)
@@ -247,7 +264,15 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
 
             if frame_index % SHOW_EVERY_N == 0:
                 safe_show(window_name, frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"): break
+            # Write frame to output video
+            if out.isOpened():
+                out.write(frame)
+
+                try:
+                    if cv2.waitKey(1) & 0xFF == ord("q"): break
+                except cv2.error:
+                    # OpenCV waitKey not available
+                    pass
 
             if frame_index % SNAPSHOT_INTERVAL == 0:
                 snapshot_path = SNAPSHOT_DIR / f"{route_name}_latest.jpg"
@@ -268,7 +293,11 @@ def process_route(route_name: str, video_path: str, model, tracker, session, rou
         session.commit()
         
         cap.release()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            # OpenCV display not available
+            pass
         end_route_run(session, run)
         print(f"Finished {route_name}. Totals: {counts}")
 

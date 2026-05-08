@@ -36,9 +36,9 @@ def _compute_confidence(best_score: float, second_score: float) -> float:
         return 0.0
     if np.isinf(second_score):
         return 0.98
-    gap = second_score - best_score
-    denom = max(abs(second_score), 1.0)
-    normalized = max(0.0, min(gap / denom, 1.0))
+    gap = abs(second_score - best_score)
+    normalized = gap / max(best_score, 1.0)
+    normalized = min(max(normalized, 0.0), 1.0)
     base = config["agent"]["confidence_mapping"]["base"]
     conf = base + normalized * (0.98 - base)
     return round(float(conf), 2)
@@ -71,13 +71,26 @@ def fetch_route_statistics(route_id: str, window: int = 10) -> dict:
         total_counts = int(df["count"].sum())
 
         # recent window
-        cutoff = df["minute"].max() - pd.Timedelta(minutes=window)
+        actual_range = (df["minute"].max() - df["minute"].min()).total_seconds() / 60
+        effective_window = min(window, max(actual_range, 1))
+
+        cutoff = df["minute"].max() - pd.Timedelta(minutes=effective_window)
         recent = df[df["minute"] >= cutoff]
         recent_window_counts = int(recent["count"].sum())
 
+
         # rolling 5-min
         df_roll = get_rolling_5min(df)
-        rolling_record = df_roll.tail(1).to_dict("records")[0] if (df_roll is not None and not df_roll.empty) else {}
+
+        #  get numeric average only over class count columns
+        if df_roll is not None and not df_roll.empty:
+            latest = df_roll.tail(1).copy()
+            # remove non-numeric columns
+            numeric_cols = [c for c in latest.columns if c not in ["minute"]]
+            rolling_record = latest[numeric_cols].to_dict("records")[0]
+        else:
+            rolling_record = {}
+
 
         class_dist_df = get_class_distribution(route.id)
         class_dist = class_dist_df.to_dict("records") if (class_dist_df is not None and not class_dist_df.empty) else []
