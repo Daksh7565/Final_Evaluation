@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 import torch
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DB import engine, Route, RouteRun, get_time_series_counts, get_class_distribution
 from agent import get_route_recommendation
@@ -229,163 +231,375 @@ def show_gallery_page():
 # PAGE 2: LIVE PROCESSING
 # ============================================================================
 
+def _load_worker_model():
+    """Load a dedicated model + tracker for each worker thread."""
+    model = RFDETRBase()
+    try:
+        if torch.cuda.is_available():
+            model = model.to("cuda")
+    except Exception:
+        pass
+    tracker = Sort(max_age=20, min_hits=2, iou_threshold=0.2)
+    return model, tracker
+
+
+def _worker_process_route(shared_state, route_name, video_path, worker_id):
+    """Thread worker: processes one route and pushes frames/stats to shared_state."""
+    st_key = f"slot_{worker_id}"
+
+    # Each worker gets its own DB session
+    session = RouteSessionLocal()
+    try:
+        location = ROUTE_LOCATIONS.get(route_name, f"Camera {route_name}")
+        route_obj = get_or_create_route(
+            session, route_name,
+            location=location,
+            line_config={"type": "horizontal", "y_percent": 0.8}
+        )
+
+        # Check if already processed
+        completed_run = session.query(RouteRun).filter(
+            RouteRun.route_id == route_obj.id,
+            RouteRun.end_time.isnot(None)
+        ).first()
+
+        if completed_run:
+            with shared_state["lock"]:
+                shared_state[st_key] = {
+                    "status": "skipped",
+                    "route_name": route_name,
+                    "frame": None,
+                    "frame_index": 0,
+                    "total_frames": 0,
+                    "counts": {},
+                    "detections": 0,
+                    "timestamp": "",
+                    "fps": 0,
+                    "elapsed": 0,
+                    "message": f"{route_name} already processed"
+                }
+            return
+
+        # Load dedicated model for this worker
+        model, tracker = _load_worker_model()
+
+        route_start = time.time()
+
+        for result in process_route_generator(route_name, video_path, model, tracker, session, route_obj):
+            with shared_state["lock"]:
+                if result["status"] == "frame":
+                    # Resize frame for display performance
+                    frame = result["frame"]
+                    h, w = frame.shape[:2]
+                    max_w = 900
+                    if w > max_w:
+                        frame = cv2.resize(frame, (max_w, int(h * max_w / w)))
+
+                    elapsed = time.time() - route_start
+                    fps = result["frame_index"] / elapsed if elapsed > 0 else 0
+
+                    shared_state[st_key] = {
+                        "status": "running",
+                        "route_name": route_name,
+                        "frame": frame,
+                        "frame_index": result["frame_index"],
+                        "total_frames": result["total_frames"],
+                        "counts": result["counts"],
+                        "detections": result["detections"],
+                        "timestamp": result["timestamp"],
+                        "fps": fps,
+                        "elapsed": elapsed,
+                        "message": f"Processing {route_name}..."
+                    }
+
+                elif result["status"] == "completed":
+                    shared_state[st_key] = {
+                        "status": "completed",
+                        "route_name": route_name,
+                        "frame": None,
+                        "frame_index": result.get("frame_index", 0),
+                        "total_frames": result.get("frame_index", 0),
+                        "counts": result["counts"],
+                        "detections": 0,
+                        "timestamp": "",
+                        "fps": 0,
+                        "elapsed": time.time() - route_start,
+                        "message": f"{route_name} completed — {result['counts']}"
+                    }
+                    shared_state["completed_count"] = shared_state.get("completed_count", 0) + 1
+
+                elif result["status"] == "error":
+                    shared_state[st_key] = {
+                        "status": "error",
+                        "route_name": route_name,
+                        "frame": None,
+                        "frame_index": 0,
+                        "total_frames": 0,
+                        "counts": {},
+                        "detections": 0,
+                        "timestamp": "",
+                        "fps": 0,
+                        "elapsed": 0,
+                        "message": result["message"]
+                    }
+    finally:
+        session.close()
+
+
 def show_processing_page():
-    """Run the AI model on all videos with live frame display."""
-    st.title("🔬 Live Model Processing")
+    """Run the AI model on videos 2-at-a-time with side-by-side live display."""
+    st.title("🔬 Live Model Processing — Dual Stream")
     st.info("""
-        The AI detection model (RFDETR + SORT tracker) is processing each video route sequentially. 
-        Live frames with detection overlays are shown below. Please do not navigate away until processing completes.
+        The AI detection model processes **2 video routes simultaneously**. 
+        Live frames with detection overlays are shown side-by-side below.
+        Each slot runs independently with its own model instance.
     """)
 
-    # Load model and tracker (cached)
-    try:
-        model, tracker = load_model_and_tracker()
-    except Exception as e:
-        st.error(f"Failed to load AI model: {e}")
-        if st.button("← Back to Gallery"):
-            st.session_state.page = "gallery"
-            st.rerun()
+    # Gather pending routes
+    all_routes = list(ROUTE_VIDEOS.items())
+    pending_routes = []
+    for rname, vpath in all_routes:
+        if not Path(vpath).exists():
+            continue
+        session = RouteSessionLocal()
+        try:
+            route_obj = session.query(Route).filter_by(name=rname).first()
+            if route_obj:
+                completed = session.query(RouteRun).filter(
+                    RouteRun.route_id == route_obj.id,
+                    RouteRun.end_time.isnot(None)
+                ).first()
+                if not completed:
+                    pending_routes.append((rname, vpath))
+            else:
+                pending_routes.append((rname, vpath))
+        finally:
+            session.close()
+
+    # If nothing pending, jump straight to done
+    if not pending_routes:
+        st.success("✅ All routes already processed!")
+        nav_cols = st.columns([1, 1.5, 1])
+        with nav_cols[1]:
+            if st.button("🏠 Go to Dashboard", type="primary", use_container_width=True):
+                load_route_names.clear()
+                load_route_data.clear()
+                st.session_state.page = "dashboard"
+                st.rerun()
         return
 
     # Overall progress
-    total_routes = len(ROUTE_VIDEOS)
-    overall_progress = st.progress(0, text="Starting...")
+    total_pending = len(pending_routes)
+    st.markdown(f"**Routes pending:** {total_pending} | **Processing:** 2 at a time")
+    overall_progress = st.progress(0, text="Preparing...")
 
-    # Layout: main video area + stats sidebar
-    vid_col, stats_col = st.columns([3, 1])
+    # ── Slot 1 Layout ──
+    st.markdown("### 🎥 Active Processing Streams")
+    slot_cols = st.columns(2)
 
-    with vid_col:
-        frame_placeholder = st.empty()
-        route_header = st.empty()
-        frame_progress = st.empty()
-
-    with stats_col:
-        st.markdown("### 📊 Live Stats")
-        current_route_display = st.empty()
-        frame_counter = st.empty()
-        fps_display = st.empty()
-        elapsed_display = st.empty()
+    # Slot 0 placeholders
+    with slot_cols[0]:
+        slot0_header = st.empty()
+        slot0_frame = st.empty()
+        slot0_progress = st.empty()
         st.markdown("---")
-        st.markdown("**Vehicle Counts**")
-        vehicle_counts_display = st.empty()
-        st.markdown("---")
-        status_log = st.empty()
+        st.markdown("**📊 Slot 1 Stats**")
+        slot0_frame_counter = st.empty()
+        slot0_fps = st.empty()
+        slot0_elapsed = st.empty()
+        slot0_counts = st.empty()
 
-    # Processing log
+    # Slot 1 placeholders
+    with slot_cols[1]:
+        slot1_header = st.empty()
+        slot1_frame = st.empty()
+        slot1_progress = st.empty()
+        st.markdown("---")
+        st.markdown("**📊 Slot 2 Stats**")
+        slot1_frame_counter = st.empty()
+        slot1_fps = st.empty()
+        slot1_elapsed = st.empty()
+        slot1_counts = st.empty()
+
+    # Status log
+    status_container = st.container()
+    with status_container:
+        st.markdown("### 📋 Processing Log")
+        log_display = st.empty()
+
     log_messages = []
 
     def add_log(msg):
         log_messages.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-        # Keep last 6 messages
-        if len(log_messages) > 6:
+        if len(log_messages) > 20:
             log_messages.pop(0)
-        status_log.markdown(
-            "<div style='font-size: 0.8rem; color: #666; background: #f5f5f5; padding: 8px; border-radius: 4px;'>" +
+        log_display.markdown(
+            "<div style='font-size: 0.82rem; color: #555; background: #f8f8f8; padding: 10px; border-radius: 6px; max-height: 200px; overflow-y: auto;'>" +
             "<br>".join(log_messages) +
             "</div>",
             unsafe_allow_html=True
         )
 
-    # Process each route
-    completed_routes = 0
+    # Shared state for inter-thread communication
+    manager_state = {
+        "lock": threading.Lock(),
+        "slot_0": {"status": "idle", "route_name": "", "frame": None, "frame_index": 0,
+                   "total_frames": 0, "counts": {}, "detections": 0, "timestamp": "",
+                   "fps": 0, "elapsed": 0, "message": ""},
+        "slot_1": {"status": "idle", "route_name": "", "frame": None, "frame_index": 0,
+                   "total_frames": 0, "counts": {}, "detections": 0, "timestamp": "",
+                   "fps": 0, "elapsed": 0, "message": ""},
+        "completed_count": 0,
+        "total_processed_count": total_pending - len(pending_routes)  # already done
+    }
+
+    # Process in pairs
     grand_start = time.time()
+    total_routes_all = len(all_routes)
+    routes_done = total_routes_all - total_pending  # pre-completed
 
-    for idx, (rname, vpath) in enumerate(ROUTE_VIDEOS.items()):
-        # Update overall progress
-        progress_val = idx / total_routes
-        overall_progress.progress(
-            progress_val,
-            text=f"Route {idx + 1} of {total_routes}: {rname}"
-        )
+    # Placeholders for slot headers
+    slot0_header.markdown("🟡 **Slot 1:** Waiting...")
+    slot1_header.markdown("🟡 **Slot 2:** Waiting...")
 
-        if not Path(vpath).exists():
-            add_log(f"⚠️ Video not found: {vpath}")
-            continue
+    # Break pending routes into pairs
+    route_pairs = []
+    for i in range(0, len(pending_routes), 2):
+        pair = pending_routes[i:i+2]
+        # Pad with None if odd number
+        if len(pair) == 1:
+            pair.append(None)
+        route_pairs.append(pair)
 
-        location = ROUTE_LOCATIONS.get(rname, f"Camera {rname}")
-        route_header.markdown(f"### 🎥 {rname} — *{location}*")
-        current_route_display.markdown(f"**Route:** `{rname}`")
+    for pair in route_pairs:
+        active_workers = []
 
-        with RouteSessionLocal() as session:
-            route_obj = get_or_create_route(
-                session, rname,
-                location=location,
-                line_config={"type": "horizontal", "y_percent": 0.8}
-            )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
 
-            # Check if already processed
-            completed_run = session.query(RouteRun).filter(
-                RouteRun.route_id == route_obj.id,
-                RouteRun.end_time.isnot(None)
-            ).first()
+            for slot_id, route_item in enumerate(pair):
+                if route_item is not None:
+                    rname, vpath = route_item
+                    add_log(f"▶️ Assigning {rname} to Slot {slot_id + 1}")
+                    future = executor.submit(
+                        _worker_process_route,
+                        manager_state, rname, vpath, slot_id
+                    )
+                    futures[future] = (slot_id, rname)
 
-            if completed_run:
-                add_log(f"⏭️ {rname} already processed — skipping")
-                completed_routes += 1
-                continue
+            # Mark unused slot as done immediately
+            for slot_id, route_item in enumerate(pair):
+                if route_item is None:
+                    with manager_state["lock"]:
+                        manager_state[f"slot_{slot_id}"] = {
+                            "status": "idle", "route_name": "", "frame": None,
+                            "frame_index": 0, "total_frames": 0, "counts": {},
+                            "detections": 0, "timestamp": "", "fps": 0,
+                            "elapsed": 0, "message": "No route assigned"
+                        }
 
-            add_log(f"▶️ Starting {rname}...")
-            route_start = time.time()
-            total_yielded_frames = 0
+            # Poll and display while workers are running
+            active = True
+            while active:
+                active = False
+                for future in futures:
+                    if not future.done():
+                        active = True
+                        break
 
-            for result in process_route_generator(rname, vpath, model, tracker, session, route_obj):
-                if result["status"] == "frame":
-                    total_yielded_frames += 1
-                    frame_idx = result["frame_index"]
-                    total_f = result["total_frames"]
-                    counts = result["counts"]
+                # Read shared state and update UI
+                with manager_state["lock"]:
+                    s0 = manager_state["slot_0"].copy()
+                    s1 = manager_state["slot_1"].copy()
 
-                    # Resize frame for display performance
-                    display_frame = result["frame"]
-                    h, w = display_frame.shape[:2]
-                    max_w = 1280
-                    if w > max_w:
-                        display_frame = cv2.resize(display_frame, (max_w, int(h * max_w / w)))
+                # ── Update Slot 0 ──
+                if s0["route_name"]:
+                    loc0 = ROUTE_LOCATIONS.get(s0["route_name"], "")
+                    status_emoji_0 = {"running": "🔴", "completed": "✅", "skipped": "⏭️",
+                                      "error": "❌", "idle": "🟡"}.get(s0["status"], "🟡")
+                    slot0_header.markdown(f"{status_emoji_0} **Slot 1:** `{s0['route_name']}` — *{loc0}*")
 
-                    frame_placeholder.image(display_frame, use_container_width=True)
+                    if s0["frame"] is not None:
+                        slot0_frame.image(s0["frame"], use_container_width=True)
 
-                    # Update frame progress bar
-                    if total_f > 0:
-                        frame_progress.progress(
-                            min(frame_idx / total_f, 0.999),
-                            text=f"Frame {frame_idx:,} / {total_f:,}"
-                        )
-                    else:
-                        frame_progress.progress(0, text=f"Frame {frame_idx:,}")
+                    if s0["total_frames"] > 0 and s0["status"] == "running":
+                        prog = min(s0["frame_index"] / s0["total_frames"], 0.999)
+                        slot0_progress.progress(prog, text=f"Frame {s0['frame_index']:,} / {s0['total_frames']:,}")
+                    elif s0["status"] == "completed":
+                        slot0_progress.progress(1.0, text="✅ Complete")
+                    elif s0["status"] == "skipped":
+                        slot0_progress.progress(1.0, text="⏭️ Skipped (already done)")
 
-                    # Update stats
-                    elapsed = time.time() - route_start
-                    fps = frame_idx / elapsed if elapsed > 0 else 0
-
-                    frame_counter.metric("Frame", f"{frame_idx:,}", f"of {total_f:,}" if total_f > 0 else "")
-                    fps_display.metric("Speed", f"{fps:.1f} FPS")
-                    elapsed_display.metric("Elapsed", f"{elapsed:.0f}s")
+                    slot0_frame_counter.metric("Frame", f"{s0['frame_index']:,}")
+                    slot0_fps.metric("Speed", f"{s0['fps']:.1f} FPS")
+                    slot0_elapsed.metric("Elapsed", f"{s0['elapsed']:.0f}s")
 
                     counts_md = ""
-                    for vclass, count in counts.items():
+                    for vclass, count in s0["counts"].items():
                         counts_md += f"- **{vclass.title()}:** {count}<br>"
-                    vehicle_counts_display.markdown(counts_md, unsafe_allow_html=True)
+                    slot0_counts.markdown(counts_md if counts_md else "*No vehicles detected yet*", unsafe_allow_html=True)
 
-                elif result["status"] == "completed":
-                    add_log(f"✅ {rname} completed — {result['counts']}")
-                    completed_routes += 1
+                # ── Update Slot 1 ──
+                if s1["route_name"]:
+                    loc1 = ROUTE_LOCATIONS.get(s1["route_name"], "")
+                    status_emoji_1 = {"running": "🔴", "completed": "✅", "skipped": "⏭️",
+                                      "error": "❌", "idle": "🟡"}.get(s1["status"], "🟡")
+                    slot1_header.markdown(f"{status_emoji_1} **Slot 2:** `{s1['route_name']}` — *{loc1}*")
 
-                elif result["status"] == "error":
-                    add_log(f"❌ {rname} error: {result['message']}")
+                    if s1["frame"] is not None:
+                        slot1_frame.image(s1["frame"], use_container_width=True)
 
-    # All routes complete
-    overall_elapsed = time.time() - grand_start
+                    if s1["total_frames"] > 0 and s1["status"] == "running":
+                        prog = min(s1["frame_index"] / s1["total_frames"], 0.999)
+                        slot1_progress.progress(prog, text=f"Frame {s1['frame_index']:,} / {s1['total_frames']:,}")
+                    elif s1["status"] == "completed":
+                        slot1_progress.progress(1.0, text="✅ Complete")
+                    elif s1["status"] == "skipped":
+                        slot1_progress.progress(1.0, text="⏭️ Skipped (already done)")
+
+                    slot1_frame_counter.metric("Frame", f"{s1['frame_index']:,}")
+                    slot1_fps.metric("Speed", f"{s1['fps']:.1f} FPS")
+                    slot1_elapsed.metric("Elapsed", f"{s1['elapsed']:.0f}s")
+
+                    counts_md = ""
+                    for vclass, count in s1["counts"].items():
+                        counts_md += f"- **{vclass.title()}:** {count}<br>"
+                    slot1_counts.markdown(counts_md if counts_md else "*No vehicles detected yet*", unsafe_allow_html=True)
+
+                # Update overall progress
+                with manager_state["lock"]:
+                    newly_done = manager_state.get("completed_count", 0)
+                routes_done = (total_routes_all - total_pending) + newly_done
+                overall_progress.progress(
+                    routes_done / total_routes_all,
+                    text=f"Completed {routes_done} of {total_routes_all} routes"
+                )
+
+                # Brief sleep to let Streamlit breathe
+                time.sleep(0.05)
+
+            # All futures in this pair are done
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    slot_id, rname = futures[future]
+                    add_log(f"❌ Exception in Slot {slot_id + 1} ({rname}): {e}")
+
+        add_log(f"✅ Pair complete. Moving to next pair...")
+
+    # All pairs complete
+    grand_elapsed = time.time() - grand_start
     overall_progress.progress(1.0, text="All routes processed!")
 
     st.divider()
     st.balloons()
-    st.success(f"🎉 All routes processed successfully in {overall_elapsed:.1f} seconds!")
+    st.success(f"🎉 All routes processed successfully in {grand_elapsed:.1f} seconds!")
 
     # Navigation to dashboard
     nav_cols = st.columns([1, 1.5, 1])
     with nav_cols[1]:
         if st.button("🏠 Go to Dashboard", type="primary", use_container_width=True):
-            # Clear cached data so dashboard loads fresh
             load_route_names.clear()
             load_route_data.clear()
             st.session_state.page = "dashboard"
