@@ -1,0 +1,19 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+rfdetr
+streamlit
+pandas
+numpy
+plotly
+SQLAlchemy
+opencv-python-headless
+scipy
+filterpy
+PyYAML
+python-dotenv
+requests
+langchain
+langchain-core
+langchain-groq
+langgraph
