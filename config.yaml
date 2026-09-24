@@ -7,7 +7,7 @@ paths:
   # Directory where your route videos are stored.
   video_dir: "data/test"
   # Path to the SQLite database file.
-  database: "data/traffic.db"
+  database: "traffic.db"
   # Directory for JSON logs.
   log_dir: "logs/json"
   # Directory to save processed frame snapshots for the dashboard.
