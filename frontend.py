@@ -65,7 +65,7 @@ def get_busiest_hour(df_minute):
         return "N/A"
     
     df_minute['minute'] = pd.to_datetime(df_minute['minute'])
-    per_minute_total = df_minute.groupby(pd.Grouper(key='minute', freq='T'))['count'].sum().reset_index()
+    per_minute_total = df_minute.groupby(pd.Grouper(key='minute', freq='min'))['count'].sum().reset_index()
 
     if per_minute_total.empty:
         return "N/A"
@@ -117,7 +117,7 @@ st.subheader("Real-time monitoring and intelligent route recommendations")
 with st.container(border=True):
     st.header("🤖 AI Agent Recommendation")
     
-    if st.button("Recommend the Best Route Now", type="primary", use_container_width=True):
+    if st.button("Recommend the Best Route Now", type="primary", width="stretch"):
         with st.spinner("The AI agent is analyzing the latest traffic data from all routes..."):
             recommendation_text = get_route_recommendation()
             st.success("**Analysis Complete! Here is the recommendation:**")
@@ -158,7 +158,7 @@ if selected_route:
             else:
                 st.info("Live snapshot will appear here once video processing for this route begins.")
         with control_col:
-            st.button("Refresh Snapshot", use_container_width=True)
+            st.button("Refresh Snapshot", width="stretch")
 
         # --- Charts in Tabs ---
         tab1, tab2 = st.tabs(["📊 Traffic Flow Over Time", "🚗 Vehicle Distribution"])
@@ -172,16 +172,16 @@ if selected_route:
                 value="1 Minute"
             )
             time_mapping = {
-                "10 Seconds": "10S", "30 Seconds": "30S", "1 Minute": "T",
-                "5 Minutes": "5T", "1 Hour": "H"
+                "10 Seconds": "10s", "30 Seconds": "30s", "1 Minute": "min",
+                "5 Minutes": "5min", "1 Hour": "h"
             }
             resample_rule = time_mapping[time_granularity]
             df_resampled = resample_traffic_data(df_ts.copy(), resample_rule)
 
             if not df_resampled.empty:
                 time_format = '%H:%M'
-                if resample_rule in ["10S", "30S"]: time_format = '%H:%M:%S'
-                elif resample_rule == "H": time_format = '%H:00'
+                if resample_rule in ["10s", "30s"]: time_format = '%H:%M:%S'
+                elif resample_rule == "h": time_format = '%H:00'
                 
                 df_resampled['time_label'] = df_resampled['minute'].dt.strftime(time_format)
                 pivot_df = df_resampled.pivot_table(index='time_label', columns='class_name', values='count', fill_value=0)
@@ -201,7 +201,7 @@ if selected_route:
                     fig.add_annotation(x=peak_time, y=peak_value, text=f"Peak: {int(peak_value)} vehicles", showarrow=True, arrowhead=2)
 
                 fig.update_layout(height=450, xaxis_title=f"Time (Granularity: {time_granularity})", yaxis_title="Vehicle Count", hovermode="x unified", template="plotly_dark", legend_title="Vehicle Types")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             else:
                 st.warning("No time-series data available for the selected route.")
 
@@ -217,7 +217,7 @@ if selected_route:
                     st.write("Proportion of Vehicle Types")
                     fig_pie = px.pie(df_distribution, values='count', names='class_name', hole=.3)
                     fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-                    st.plotly_chart(fig_pie, use_container_width=True)
+                    st.plotly_chart(fig_pie, width="stretch")
             else:
                 st.warning("No vehicle distribution data available.")
 
