@@ -63,7 +63,7 @@ agent:
 
   llm:
     # Model name to use for generating the reason text (optional).
-    model_name: "llama3-8b-8192"
+    model_name: "llama-3.1-8b-instant"
 
 # --- Dashboard Settings (for frontend.py) ---
 dashboard:
